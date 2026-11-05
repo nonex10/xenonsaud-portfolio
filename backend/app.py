@@ -1,6 +1,9 @@
+import json
 import os
 import re
 import smtplib
+import urllib.error
+import urllib.request
 from email.message import EmailMessage
 
 from dotenv import load_dotenv
@@ -66,8 +69,36 @@ def validate(data):
     return {"name": name, "email": email, "message": message}, errors
 
 
-def send_email(name, email, message):
-    """Send the visitor's message to the site owner using SMTP (Gmail by default)."""
+def send_via_resend(name, email, message):
+    """Send through Resend's web API (works on Render's free plan, which blocks SMTP)."""
+    payload = {
+        "from": os.environ.get("RESEND_FROM", "Portfolio Contact <onboarding@resend.dev>"),
+        "to": [os.environ["CONTACT_RECEIVER_EMAIL"]],
+        "reply_to": email,  # pressing Reply goes to the visitor
+        "subject": f"Portfolio message from {name}",
+        "text": f"Name: {name}\nEmail: {email}\n\nMessage:\n{message}\n",
+    }
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {os.environ['RESEND_API_KEY']}",
+            "Content-Type": "application/json",
+            "User-Agent": "portfolio-contact-form/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15):
+            pass
+    except urllib.error.HTTPError as err:
+        # Log what Resend said (never the API key) so setup problems are easy to find.
+        app.logger.error("Resend rejected the email: %s %s", err.code, err.read().decode("utf-8", "replace"))
+        raise
+
+
+def send_via_smtp(name, email, message):
+    """Send through Gmail SMTP (fine on your own computer; blocked on Render's free plan)."""
     sender = os.environ["SMTP_EMAIL"]
     password = os.environ["SMTP_APP_PASSWORD"]
     receiver = os.environ["CONTACT_RECEIVER_EMAIL"]
@@ -86,6 +117,14 @@ def send_email(name, email, message):
         server.send_message(msg)
 
 
+def send_email(name, email, message):
+    """Use Resend if RESEND_API_KEY is set (live site), otherwise Gmail SMTP (local)."""
+    if os.environ.get("RESEND_API_KEY"):
+        send_via_resend(name, email, message)
+    else:
+        send_via_smtp(name, email, message)
+
+
 @app.get("/api/health")
 def health():
     return jsonify({"status": "ok"})
@@ -101,7 +140,10 @@ def contact():
         return jsonify({"success": False, "errors": errors,
                         "message": "Please check the form and try again."}), 400
 
-    required = ["SMTP_EMAIL", "SMTP_APP_PASSWORD", "CONTACT_RECEIVER_EMAIL"]
+    if os.environ.get("RESEND_API_KEY"):
+        required = ["CONTACT_RECEIVER_EMAIL"]
+    else:
+        required = ["SMTP_EMAIL", "SMTP_APP_PASSWORD", "CONTACT_RECEIVER_EMAIL"]
     if any(not os.environ.get(k) for k in required):
         app.logger.error("Email settings are missing on the server.")
         return jsonify({"success": False,
@@ -148,13 +190,17 @@ def bad_method(_e):
 
 def startup_check():
     """Print simple warnings so setup mistakes are easy to spot. Secrets are never printed."""
-    for key in ("SMTP_EMAIL", "SMTP_APP_PASSWORD", "CONTACT_RECEIVER_EMAIL", "FRONTEND_URL"):
+    using_resend = bool(os.environ.get("RESEND_API_KEY"))
+    needed = ["CONTACT_RECEIVER_EMAIL", "FRONTEND_URL"]
+    if not using_resend:
+        needed += ["SMTP_EMAIL", "SMTP_APP_PASSWORD"]
+    for key in needed:
         if not os.environ.get(key):
             print(f"[setup] WARNING: {key} is missing. Add it to backend/.env and restart.")
+    print(f"[setup] Email method: {'Resend (web API)' if using_resend else 'Gmail SMTP'}")
     pw = os.environ.get("SMTP_APP_PASSWORD", "")
-    if pw and len(pw.replace(" ", "")) != 16:
-        print("[setup] WARNING: SMTP_APP_PASSWORD is not 16 characters. "
-              "Gmail app passwords are exactly 16 letters; sending will fail until it is fixed.")
+    if not using_resend and pw and len(pw.replace(" ", "")) != 16:
+        print("[setup] WARNING: SMTP_APP_PASSWORD is not 16 characters. Gmail app passwords are exactly 16 letters.")
     print(f"[setup] Allowed website address(es): {allowed_origins or 'NONE (set FRONTEND_URL)'}")
 
 
