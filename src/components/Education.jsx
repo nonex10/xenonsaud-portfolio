@@ -11,7 +11,7 @@ export default function Education() {
               Education
             </p>
             <h3 className="font-display text-xl font-bold tracking-tightest2 text-ink">
-              Bachelor's Degree, BIT/CSIT
+              Bachelor's Degree, BIT
             </h3>
             <p className="text-mute mt-1.5">Padmakanya Multiple Campus, Tribhuvan University</p>
           </div>
